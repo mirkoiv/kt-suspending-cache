@@ -1,0 +1,10 @@
+style:
+  active: true
+  ReturnCount:
+    active: true
+    max: 5
+
+exceptions:
+  active: true
+  TooGenericExceptionCaught:
+    active: false
