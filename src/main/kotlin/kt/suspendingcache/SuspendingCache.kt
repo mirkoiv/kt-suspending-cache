@@ -8,12 +8,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Clock
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration
 
 private val logger = KotlinLogging.logger {}
@@ -98,6 +101,11 @@ class SuspendingCache(
 
     private suspend fun enforceMaxSize() {
         if (data.size >= maxSize) {
+            val expired = data.entries.firstOrNull { it.value.isExpired() }?.key
+            expired?.let {
+                removeEntry(it)
+                return
+            }
             val lruKey = data.minByOrNull { it.value.lastUsedAt }?.key
             lruKey?.let {
                 removeEntry(it)
@@ -137,7 +145,7 @@ class SuspendingCache(
 
         private var expiresAt = 0L
 
-        private var deferred: Deferred<Any?>? = null
+        private var deferred: AwaiterCounterDeferred<Any?>? = null
 
         private val mutex = Mutex()
 
@@ -179,8 +187,9 @@ class SuspendingCache(
                         null
                     }
                 }
-                deferred = newDeferred
-                value = newDeferred.awaitOrNull()?.let {
+                val awaiterCounterDeferred = AwaiterCounterDeferred(newDeferred)
+                deferred = awaiterCounterDeferred
+                value = awaiterCounterDeferred.awaitOrNull()?.let {
                     setExpiresAt()
                     it
                 }
@@ -202,15 +211,39 @@ class SuspendingCache(
             return value()
         }
 
+        fun isExpired(): Boolean = expiresAt > 0L && expiresAt < clock.millis()
+
         private fun setExpiresAt() {
             expiresAt = if (ttl != Duration.INFINITE) clock.millis() + ttl.inWholeMilliseconds else 0
         }
+    }
 
-        private fun isExpired(): Boolean = expiresAt > 0L && expiresAt < clock.millis()
+    internal class AwaiterCounterDeferred<T>(private val deferred: Deferred<T>) {
+
+        private val counter = AtomicInteger(0)
+        val awaiters get() = counter.get()
+
+        suspend fun await(): T {
+            counter.incrementAndGet()
+            val callerJob = currentCoroutineContext()[Job]!!
+            callerJob.invokeOnCompletion { cause ->
+                if (cause is CancellationException) {
+                    if (counter.get() == 1 && deferred.isActive) {
+                        deferred.cancel()
+                    }
+                }
+                counter.decrementAndGet()
+            }
+            return deferred.await()
+        }
+
+        fun cancel() {
+            deferred.cancel()
+        }
     }
 }
 
-private suspend fun <T> Deferred<T>.awaitOrNull(): T? {
+private suspend fun <T> SuspendingCache.AwaiterCounterDeferred<T>.awaitOrNull(): T? {
     return try {
         this.await()
     } catch (_: Exception) {

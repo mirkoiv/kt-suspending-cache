@@ -9,7 +9,7 @@ This project was created as a capstone for the [KT Academy Coroutine Mastery Cou
 ## Key features
 - Coroutine-safe loader deduplication (single loader for concurrent requests)
 - TTL-based expiration and explicit refresh/invalidate
-- LRU eviction with configurable `maxSize`
+- Expired or LRU eviction with configurable `maxSize`
 - Cancellation of running loaders on clear
 - Configurable executor and IO dispatcher
 - Automatic retry with exponential backoff for failed loaders

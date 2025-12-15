@@ -10,6 +10,8 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import kt.suspendingcache.exceptions.TestException
 import kt.suspendingcache.utils.FakeClock
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -271,6 +273,26 @@ class SuspendingCacheTest {
         assertEquals("v-1", first)
         assertEquals("v-2", second)
         assertEquals(2, counter.get())
+    }
+
+    @Test
+    fun `max size first evicts expired entry`() = runTest {
+        // given
+        val instant = Instant.parse("2025-12-15T12:00:00Z")
+        val clock = FakeClock(instant)
+        val cache = SuspendingCache(maxSize = 2, clock = clock)
+
+        cache.get("a", ttl = 2.minutes) { "value-a" }
+        cache.get("b", ttl = 5.minutes) { "value-b" }
+        val hasValueABefore = cache.exists("a")
+
+        // when
+        clock.adjust(3.minutes)
+        cache.get("c", ttl = 2.minutes) { "value-c" }
+
+        // then
+        assertTrue(hasValueABefore)
+        assertFalse(cache.exists("a"))
     }
 
     @Test
