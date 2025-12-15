@@ -5,7 +5,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import kt.suspendingcache.exceptions.TestException
@@ -147,7 +147,7 @@ class SuspendingCacheTest {
         val started = AtomicInteger(0)
         val completed = AtomicInteger(0)
 
-        backgroundScope.launch {
+        val cached = backgroundScope.async {
             cache.get("key") {
                 started.incrementAndGet()
                 delay(100)
@@ -156,8 +156,8 @@ class SuspendingCacheTest {
             }
         }
 
-        List(10) { index ->
-            backgroundScope.launch {
+        val cancelled = List(10) { index ->
+            backgroundScope.async {
                 cache.get("key-$index") {
                     started.incrementAndGet()
                     delay(10_000)
@@ -171,10 +171,14 @@ class SuspendingCacheTest {
 
         // when
         cache.clear()
+        cached.join()
+        cancelled.joinAll()
 
         // then
         assertEquals(11, started.get())
         assertEquals(1, completed.get())
+        assertEquals("value", cached.await())
+        cancelled.forEach { assertEquals(null, it.await()) }
     }
 
     @Test

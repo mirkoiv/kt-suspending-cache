@@ -35,8 +35,6 @@ class SuspendingCache(
 
     private val mutex = Mutex()
 
-    suspend fun <K : Any, V : Any> get(key: K, loader: suspend () -> V): V? = get(key, ttl, loader)
-
     suspend fun <K : Any, V : Any> get(key: K, ttl: Duration, loader: suspend () -> V): V? {
         val entry = mutex.withLock {
             if (!data.containsKey(key)) {
@@ -47,7 +45,7 @@ class SuspendingCache(
         return entry!!.value() as V?
     }
 
-    suspend fun <K : Any, V : Any> put(key: K, loader: suspend () -> V) = put(key, ttl, loader)
+    suspend fun <K : Any, V : Any> get(key: K, loader: suspend () -> V): V? = get(key, ttl, loader)
 
     @Throws(CacheNotFoundException::class)
     suspend fun <K : Any, V : Any> get(key: K): V? {
@@ -61,6 +59,8 @@ class SuspendingCache(
             addEntry(key = key, loader = loader, ttl = ttl)
         }
     }
+
+    suspend fun <K : Any, V : Any> put(key: K, loader: suspend () -> V) = put(key, ttl, loader)
 
     suspend fun <K : Any> invalidate(key: K) {
         mutex.withLock {
