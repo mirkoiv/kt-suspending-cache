@@ -28,6 +28,7 @@ class SuspendingCache(
     private val executor: CacheLoadExecutor = CacheLoadExecutor(),
     ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val maxSize: Int = 1000,
+    private val refreshThrottle: Long = 300L,
 ) {
 
     private val scope = CoroutineScope(
@@ -83,6 +84,7 @@ class SuspendingCache(
 
     @Throws(CacheNotFoundException::class)
     suspend fun <K : Any, V : Any> refresh(key: K): V? {
+        logger.debug { "Refreshing cache for $key" }
         val entry = data[key] ?: throw CacheNotFoundException("$key")
         return entry.refresh() as V?
     }
@@ -121,7 +123,8 @@ class SuspendingCache(
             loader = loader,
             executor = executor,
             ttl = ttl,
-            clock = clock
+            clock = clock,
+            refreshThrottle = refreshThrottle,
         )
     }
 
@@ -137,11 +140,14 @@ class SuspendingCache(
         private val executor: CacheLoadExecutor,
         private val ttl: Duration = Duration.INFINITE,
         private val clock: Clock = Clock.systemDefaultZone(),
+        private val refreshThrottle: Long = 300L,
     ) {
         private var _lastUsedAt = 0L
         val lastUsedAt: Long get() = _lastUsedAt
 
         private var value: Any? = null
+
+        private var refreshedAt = 0L
 
         private var expiresAt = 0L
 
@@ -151,7 +157,7 @@ class SuspendingCache(
 
         init {
             logger.debug { "[$key] initializing cache entry" }
-            setExpiresAt()
+            updateTimestamps()
         }
 
         suspend fun value(): Any? {
@@ -164,17 +170,20 @@ class SuspendingCache(
                     deferred = null
                 }
             }
+            logger.debug { "[$key] value" }
             return value ?: loadValue()
         }
 
         private suspend fun loadValue(): Any? {
+            logger.debug { "[$key] loadValue" }
             value?.let { return it }
             deferred?.let { return it.awaitOrNull() }
 
-            mutex.withLock {
+            mutex.withLock { logger.debug { "[$key] loadValue lock" }
                 value?.let { return it }
                 deferred?.let { return it.awaitOrNull() }
 
+                logger.debug { "[$key] loadValue newDeferred" }
                 val newDeferred = scope.async(start = CoroutineStart.LAZY) {
                     try {
                         logger.debug { "[$key] loading started" }
@@ -190,30 +199,36 @@ class SuspendingCache(
                 val awaiterCounterDeferred = AwaiterCounterDeferred(newDeferred)
                 deferred = awaiterCounterDeferred
                 value = awaiterCounterDeferred.awaitOrNull()?.let {
-                    setExpiresAt()
+                    updateTimestamps()
                     it
                 }
+                logger.debug { "[$key] loadValue loaded $value" }
                 deferred = null
                 return value
             }
         }
 
         suspend fun invalidate() {
+            logger.debug { "[$key] invalidate" }
+            deferred?.cancel()
             mutex.withLock {
                 value = null
-                deferred?.cancel()
                 deferred = null
             }
         }
 
         suspend fun refresh(): Any? {
-            invalidate()
+            if (refreshedAt == 0L || refreshedAt + refreshThrottle < clock.millis()) {
+                refreshedAt = clock.millis()
+                invalidate()
+            }
             return value()
         }
 
         fun isExpired(): Boolean = expiresAt > 0L && expiresAt < clock.millis()
 
-        private fun setExpiresAt() {
+        private fun updateTimestamps() {
+            refreshedAt = clock.millis()
             expiresAt = if (ttl != Duration.INFINITE) clock.millis() + ttl.inWholeMilliseconds else 0
         }
     }
@@ -245,8 +260,10 @@ class SuspendingCache(
 
 private suspend fun <T> SuspendingCache.AwaiterCounterDeferred<T>.awaitOrNull(): T? {
     return try {
+        logger.debug { "awaiting ..." }
         this.await()
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        logger.error(e) { "awaiting failed" }
         null
     }
 }
