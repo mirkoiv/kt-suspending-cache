@@ -101,7 +101,7 @@ class SuspendingCache(
         }
     }
 
-    private suspend fun enforceMaxSize() {
+    private fun enforceMaxSize() {
         if (data.size >= maxSize) {
             val expired = data.entries.firstOrNull { it.value.isExpired() }?.key
             expired?.let {
@@ -115,7 +115,7 @@ class SuspendingCache(
         }
     }
 
-    private suspend fun <K : Any> addEntry(key: K, loader: suspend () -> Any, ttl: Duration) {
+    private fun <K : Any> addEntry(key: K, loader: suspend () -> Any, ttl: Duration) {
         enforceMaxSize()
         data[key] = CacheEntry(
             key = key,
@@ -128,7 +128,7 @@ class SuspendingCache(
         )
     }
 
-    private suspend fun <K : Any> removeEntry(key: K) {
+    private fun <K : Any> removeEntry(key: K) {
         val entry = data.remove(key)
         entry?.invalidate()
     }
@@ -161,17 +161,22 @@ class SuspendingCache(
         }
 
         suspend fun value(): Any? {
-            mutex.withLock {
-                _lastUsedAt = clock.millis()
-                if (value != null && isExpired()) {
-                    logger.debug { "[$key] cache expired" }
-                    value = null
-                    deferred?.cancel()
-                    deferred = null
+            _lastUsedAt = clock.millis()
+
+            invalidateIfExpired()
+
+            return value ?: loadValue()
+        }
+
+        private suspend fun invalidateIfExpired() {
+            if (value != null && isExpired()) {
+                mutex.withLock {
+                    if (value != null && isExpired()) {
+                        logger.debug { "[$key] cache expired" }
+                        invalidate()
+                    }
                 }
             }
-            logger.debug { "[$key] value" }
-            return value ?: loadValue()
         }
 
         private suspend fun loadValue(): Any? {
@@ -208,13 +213,10 @@ class SuspendingCache(
             }
         }
 
-        suspend fun invalidate() {
-            logger.debug { "[$key] invalidate" }
+        fun invalidate() {
+            value = null
             deferred?.cancel()
-            mutex.withLock {
-                value = null
-                deferred = null
-            }
+            deferred = null
         }
 
         suspend fun refresh(): Any? {
@@ -239,6 +241,7 @@ class SuspendingCache(
         val awaiters get() = counter.get()
 
         suspend fun await(): T {
+            logger.debug { "awaiting value ..." }
             counter.incrementAndGet()
             val callerJob = currentCoroutineContext()[Job]!!
             callerJob.invokeOnCompletion { cause ->
@@ -253,6 +256,7 @@ class SuspendingCache(
         }
 
         fun cancel() {
+            logger.debug { "cancelling loader ..." }
             deferred.cancel()
         }
     }

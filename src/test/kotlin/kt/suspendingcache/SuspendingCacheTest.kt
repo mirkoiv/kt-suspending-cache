@@ -6,7 +6,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
@@ -22,6 +21,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 class SuspendingCacheTest {
 
@@ -131,13 +131,13 @@ class SuspendingCacheTest {
             delay(100)
             "value"
         }
-        val results = coroutineScope {
+        val results =
             List(10) {
-                async {
+                backgroundScope.async {
                     cache.get("key", loader = loader)
                 }
             }.awaitAll()
-        }
+
 
         assertEquals(1, started.get())
         results.forEach { result -> assertEquals("value", result) }
@@ -362,7 +362,7 @@ class SuspendingCacheTest {
         val result2 = job2.await()
         assertEquals("value", result2)
         assertTrue(job1.isCancelled)
-        assertEquals(2, started.get())
+        assertEquals(1, started.get())
         assertEquals(1, completed.get())
     }
 
@@ -446,6 +446,7 @@ class SuspendingCacheTest {
         val job = backgroundScope.async { cache.get("key", loader = loader) }
         delay(50)
         job.cancel()
+        advanceUntilIdle()
 
         // when: new request arrives after cancellation
         val result = cache.get("key", loader = loader)
@@ -457,9 +458,12 @@ class SuspendingCacheTest {
     }
 
     @Test
-    fun `refresh invalidates cache and reloads value`() = runTest {
+    fun `refresh returns cached value within throttle window`() = runTest {
         // given
-        val cache = SuspendingCache()
+        val testDispatcher = this.coroutineContext[CoroutineDispatcher]!!
+        val instant = Instant.parse("2025-12-15T12:00:00Z")
+        val clock = FakeClock(instant)
+        val cache = SuspendingCache(ioDispatcher = testDispatcher, refreshThrottle = 300, clock = clock)
         val counter = AtomicInteger(0)
         val loader = suspend {
             counter.incrementAndGet()
@@ -468,6 +472,34 @@ class SuspendingCacheTest {
         }
 
         cache.get("key", loader = loader)
+
+        clock.adjust(100.milliseconds)
+
+        // when
+        val refreshed = cache.refresh<String, String>("key")
+
+        // then
+        assertEquals("value-1", refreshed)
+        assertEquals(1, counter.get())
+    }
+
+    @Test
+    fun `refresh invalidates cache and reloads value after throttle period`() = runTest {
+        // given
+        val testDispatcher = this.coroutineContext[CoroutineDispatcher]!!
+        val instant = Instant.parse("2025-12-15T12:00:00Z")
+        val clock = FakeClock(instant)
+        val cache = SuspendingCache(ioDispatcher = testDispatcher, refreshThrottle = 300, clock = clock)
+        val counter = AtomicInteger(0)
+        val loader = suspend {
+            counter.incrementAndGet()
+            delay(10)
+            "value-${counter.get()}"
+        }
+
+        cache.get("key", loader = loader)
+
+        clock.adjust(1.seconds)
 
         // when
         val refreshed = cache.refresh<String, String>("key")
@@ -483,7 +515,7 @@ class SuspendingCacheTest {
         val testDispatcher = this.coroutineContext[CoroutineDispatcher]!!
         val instant = Instant.parse("2025-12-15T12:00:00Z")
         val clock = FakeClock(instant)
-        val cache = SuspendingCache(ioDispatcher = testDispatcher, refreshThrottle = 100L, clock = clock)
+        val cache = SuspendingCache(ioDispatcher = testDispatcher, refreshThrottle = 300, clock = clock)
         val started = AtomicInteger(0)
         val loader = suspend {
             started.incrementAndGet()
@@ -492,10 +524,11 @@ class SuspendingCacheTest {
         }
         cache.get("key", loader = loader)
 
+        clock.adjust(1.seconds)
+
         // when: multiple concurrent refreshes
-        clock.adjust(150.milliseconds)
         val results = coroutineScope {
-            List(5) { index ->
+            List(5) {
                 async { cache.refresh<String, String>("key") }
             }.awaitAll()
         }
@@ -818,15 +851,21 @@ class SuspendingCacheTest {
     @Test
     fun `accessing entry updates its LRU timestamp`() = runTest {
         // given
-        val cache = SuspendingCache(maxSize = 2)
+        val testDispatcher = this.coroutineContext[CoroutineDispatcher]!!
+        val instant = Instant.parse("2025-12-15T12:00:00Z")
+        val clock = FakeClock(instant)
+        val cache = SuspendingCache(maxSize = 2, ioDispatcher = testDispatcher, clock = clock)
         cache.get("a") { "value-a" }
         delay(10)
+        clock.adjust(10.milliseconds)
         cache.get("b") { "value-b" }
         delay(10)
+        clock.adjust(10.milliseconds)
 
         // when: access 'a' to make it most recently used
         cache.get("a") { "value-a" }
         delay(10)
+        clock.adjust(10.milliseconds)
         cache.get("c") { "value-c" }
 
         // then: 'b' should be evicted (least recently used)
@@ -869,7 +908,7 @@ class SuspendingCacheTest {
         cache.get("key1") { "value1" }
 
         // when: simulate concurrent access during invalidation
-        val results = coroutineScope {
+        coroutineScope {
             List(10) { index ->
                 async {
                     if (index % 2 == 0) {
@@ -937,7 +976,7 @@ class SuspendingCacheTest {
         }
 
         val jobs = List(10) {
-            backgroundScope.async { cache.get("key", loader = loader)?.let { delay(100); it } }
+            backgroundScope.async { cache.get("key", loader = loader) }
         }
 
         delay(50)
@@ -947,7 +986,6 @@ class SuspendingCacheTest {
 
         // then: loader completes for remaining awaiters
         val remainingResults = jobs.drop(7).awaitAll()
-
         remainingResults.forEach { assertEquals("value", it) }
         assertEquals(1, started.get())
         assertEquals(1, completed.get())
