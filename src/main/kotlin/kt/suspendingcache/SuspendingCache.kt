@@ -39,12 +39,11 @@ class SuspendingCache(
 
     private val mutex = Mutex()
 
+    private val mutexPerKey = mutableMapOf<Any, Mutex>()
+
     suspend fun <K : Any, V : Any> get(key: K, ttl: Duration, loader: suspend () -> V): V? {
-        val entry = mutex.withLock {
-            if (!data.containsKey(key)) {
-                addEntry(key = key, loader = loader, ttl = ttl)
-            }
-            data[key]
+        val entry = data[key] ?: withLockFor(key) {
+            addEntry(key = key, loader = loader, ttl = ttl)
         }
         return entry!!.value() as V?
     }
@@ -58,7 +57,7 @@ class SuspendingCache(
     }
 
     suspend fun <K : Any, V : Any> put(key: K, ttl: Duration, loader: suspend () -> V) {
-        mutex.withLock {
+        withLockFor(key) {
             data[key]?.invalidate()
             addEntry(key = key, loader = loader, ttl = ttl)
         }
@@ -67,7 +66,7 @@ class SuspendingCache(
     suspend fun <K : Any, V : Any> put(key: K, loader: suspend () -> V) = put(key, ttl, loader)
 
     suspend fun <K : Any> invalidate(key: K) {
-        mutex.withLock {
+        withLockFor(key) {
             if (data.containsKey(key)) {
                 data[key]!!.invalidate()
             }
@@ -75,7 +74,7 @@ class SuspendingCache(
     }
 
     suspend fun <K : Any> remove(key: K) {
-        mutex.withLock {
+        withLockFor(key) {
             if (data.containsKey(key)) {
                 removeEntry(key)
             }
@@ -98,6 +97,15 @@ class SuspendingCache(
         mutex.withLock {
             data.forEach { it.value.invalidate() }
             data.clear()
+            mutexPerKey.clear()
+        }
+    }
+
+    private suspend fun <K: Any, V: Any?> withLockFor(key: K, block: suspend () -> V): V? {
+        return mutex.withLock {
+            mutexPerKey.getOrPut(key) { Mutex() }
+        }.withLock {
+            block()
         }
     }
 
@@ -115,7 +123,7 @@ class SuspendingCache(
         }
     }
 
-    private fun <K : Any> addEntry(key: K, loader: suspend () -> Any, ttl: Duration) {
+    private fun <K : Any> addEntry(key: K, loader: suspend () -> Any, ttl: Duration): CacheEntry {
         enforceMaxSize()
         data[key] = CacheEntry(
             key = key,
@@ -126,11 +134,13 @@ class SuspendingCache(
             clock = clock,
             refreshThrottle = refreshThrottle,
         )
+        return data[key]!!
     }
 
     private fun <K : Any> removeEntry(key: K) {
         val entry = data.remove(key)
         entry?.invalidate()
+        mutexPerKey.remove(key)
     }
 
     private class CacheEntry(

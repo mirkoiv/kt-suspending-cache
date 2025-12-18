@@ -325,7 +325,7 @@ class SuspendingCacheTest {
     fun `get of removed item throws CacheNotFoundException`() = runTest {
         // given
         val cache = SuspendingCache()
-        cache.put("key", {"value"})
+        cache.put("key") { "value" }
 
         // when
         cache.remove("key")
@@ -1082,6 +1082,21 @@ class SuspendingCacheTest {
         // then
         assertFalse(cache.exists("a"))
         assertFalse(cache.exists("b"))
+    }
+
+    @Test
+    fun `multiple loaders should run in parallel`() = runTest {
+        // given
+        val testDispatcher = this.coroutineContext[CoroutineDispatcher]!!
+        val cache = SuspendingCache(ioDispatcher = testDispatcher)
+
+        // when
+        val cached1 = backgroundScope.async { cache.get("key1") { delay(100).let { "value1" } } }
+        val cached2 = backgroundScope.async { cache.get("key2") { delay(100).let { "value2" } } }
+        joinAll(cached1, cached2)
+
+        // then
+        assertEquals(100, currentTime)
     }
 }
 
